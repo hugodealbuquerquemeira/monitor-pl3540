@@ -1,0 +1,62 @@
+name: Monitor PL 3540/2026
+
+on:
+  # Horarios em UTC. Brasilia = UTC-3, entao isto roda
+  # as 08h, 11h, 14h, 17h e 20h de Brasilia, de segunda a sexta.
+  schedule:
+    - cron: '0 11,14,17,20,23 * * 1-5'
+  # Permite rodar na mao pelo botao "Run workflow" na aba Actions.
+  workflow_dispatch:
+    inputs:
+      force_notify:
+        description: 'Enviar WhatsApp mesmo sem novidade (teste do canal)'
+        type: boolean
+        default: false
+
+# Necessario para o job conseguir commitar o baseline de volta no repo.
+permissions:
+  contents: write
+
+concurrency:
+  group: pl3540-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # O script usa somente a biblioteca padrao: nada para instalar.
+      - name: Rodar monitor
+        env:
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+          STATE_FILE: state/pl3540_state.json
+          FORCE_NOTIFY: ${{ inputs.force_notify && '1' || '' }}
+        run: python monitor_pl3540.py
+
+      - name: Commitar baseline (se mudou)
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain state/)" ]; then
+            git config user.name  'pl3540-monitor[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add state/
+            git commit -m 'state: atualiza baseline do PL 3540/2026 [skip ci]'
+            # Se outra execucao commitou no meio, rebase e tenta de novo.
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+            echo 'baseline atualizado'
+          else
+            echo 'baseline sem mudanca'
+          fi
