@@ -2,9 +2,9 @@ name: Monitor PL 3540/2026
 
 on:
   # Horarios em UTC. Brasilia = UTC-3, entao isto roda
-  # as 08h, 11h, 14h, 17h e 20h de Brasilia, de segunda a sexta.
+  # de hora em hora, das 08h as 18h de Brasilia, de segunda a sexta.
   schedule:
-    - cron: '0 11,14,17,20,23 * * 1-5'
+    - cron: '0 11-21 * * 1-5'
   # Permite rodar na mao pelo botao "Run workflow" na aba Actions.
   workflow_dispatch:
     inputs:
@@ -41,7 +41,7 @@ jobs:
           WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
           STATE_FILE: state/pl3540_state.json
-          FORCE_NOTIFY: ${{ inputs.force_notify && '1' || '' }}
+          FORCE_NOTIFY: 1
         run: python monitor_pl3540.py
 
       - name: Commitar baseline (se mudou)
