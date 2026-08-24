@@ -336,7 +336,7 @@ def main():
         return 0
 
     houve_novidade = bool(novos_senado or novos_camara)
-    titulo = "novidade na tramitacao" if houve_novidade else "teste manual (sem novidade)"
+    titulo = "novidade na tramitacao" if houve_novidade else "heartbeat, sem novidade"
     linhas = ["*PL %s/%s* - %s" % (CAMARA_NUMERO, CAMARA_ANO, titulo)]
 
     if novos_camara:
