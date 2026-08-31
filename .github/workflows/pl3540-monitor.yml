@@ -7,16 +7,13 @@ on:
   # 10-22 UTC = 07h as 19h de Brasilia, de segunda a sexta, a cada 30 min.
   schedule:
     - cron: '17,47 10-22 * * 1-5'
-    # Heartbeat diario (09:23 de Brasilia): manda WhatsApp mesmo sem novidade,
-    # para o silencio do canal virar sinal de problema, e nao de calmaria.
-    - cron: '23 12 * * 1-5'
   # Permite rodar na mao pelo botao "Run workflow" na aba Actions.
   workflow_dispatch:
     inputs:
       force_notify:
         description: 'Enviar WhatsApp mesmo sem novidade (teste do canal)'
         type: boolean
-        default: false
+        default: true
 
 # Necessario para o job conseguir commitar o baseline de volta no repo.
 permissions:
@@ -51,8 +48,9 @@ jobs:
           # tentativas rende melhor do que uma espera longa que estoura o job.
           HTTP_TIMEOUT: '20'
           HTTP_TENTATIVAS: '4'
-          # Heartbeat so no cron diario ou quando rodado na mao com a flag.
-          FORCE_NOTIFY: "${{ (github.event.inputs.force_notify == 'true' || github.event.schedule == '23 12 * * 1-5') && '1' || '0' }}"
+          # Heartbeat em TODA rodada: 2x por hora. Assim o silencio do canal
+          # vira sinal de problema, e nao de calmaria na tramitacao.
+          FORCE_NOTIFY: '1'
         run: python monitor_pl3540.py
 
       - name: Commitar baseline (se mudou)
