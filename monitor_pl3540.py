@@ -48,7 +48,8 @@ SENADO_URL = "https://legis.senado.leg.br/dadosabertos/materia/movimentacoes/%s"
 SENADO_LINK = "https://www25.senado.leg.br/web/atividade/materias/-/materia/%s" % SENADO_CODIGO
 CAMARA_API = "https://dadosabertos.camara.leg.br/api/v2"
 
-TIMEOUT = 45
+TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "20"))
+TENTATIVAS_HTTP = int(os.environ.get("HTTP_TENTATIVAS", "4"))
 USER_AGENT = "monitor-pl3540/1.0 (+github actions; monitoramento legislativo)"
 MAX_MSG_CHARS = 850          # CallMeBot corta mensagens muito longas
 MAX_ITENS_MSG = 6            # quantos eventos novos detalhar por rodada
@@ -78,7 +79,7 @@ def http_get(url, accept):
         return resp.read()
 
 
-def http_get_retry(url, accept, tentativas=3):
+def http_get_retry(url, accept, tentativas=TENTATIVAS_HTTP):
     erro = None
     for i in range(tentativas):
         try:
@@ -242,7 +243,11 @@ def enviar_whatsapp(texto):
     })
     try:
         resp = http_get(url, "text/plain")
-        log("  callmebot ok (%d bytes de resposta)" % len(resp))
+        # Repo publico: os logs do Actions sao publicos. Mascara digitos
+        # para o corpo da resposta nunca vazar o numero de telefone.
+        corpo = " ".join(resp.decode("utf-8", "replace").split())
+        corpo = "".join("x" if ch.isdigit() else ch for ch in corpo)
+        log("  callmebot HTTP 200 (%d bytes): %s" % (len(resp), corpo[:400]))
         return True
     except urllib.error.HTTPError as exc:
         log("  ERRO callmebot: HTTP %s %s" % (exc.code, exc.reason))
@@ -307,6 +312,11 @@ def main():
         log("ERRO: nenhuma das duas fontes respondeu. Nada a fazer.")
         for e in erros:
             log("  " + e)
+        enviar_whatsapp(
+            "*PL %s/%s* - MONITOR CEGO\n\n"
+            "Nao consegui ler nem o Senado nem a Camara nesta rodada.\n"
+            "Sem leitura, nao da para saber se houve movimentacao.\n\n%s"
+            % (CAMARA_NUMERO, CAMARA_ANO, SENADO_LINK))
         return 1
 
     anterior = carregar_estado()

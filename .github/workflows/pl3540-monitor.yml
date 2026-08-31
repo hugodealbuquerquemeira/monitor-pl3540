@@ -1,10 +1,15 @@
 name: Monitor PL 3540/2026
 
 on:
-  # Horarios em UTC. Brasilia = UTC-3, entao isto roda
-  # de hora em hora, das 08h as 18h de Brasilia, de segunda a sexta.
+  # Horarios em UTC. Brasilia = UTC-3.
+  # Minutos :17 e :47 de proposito: o agendador do GitHub descarta muita
+  # coisa agendada no minuto :00, que e a faixa mais concorrida.
+  # 10-22 UTC = 07h as 19h de Brasilia, de segunda a sexta, a cada 30 min.
   schedule:
-    - cron: '0 11-21 * * 1-5'
+    - cron: '17,47 10-22 * * 1-5'
+    # Heartbeat diario (09:23 de Brasilia): manda WhatsApp mesmo sem novidade,
+    # para o silencio do canal virar sinal de problema, e nao de calmaria.
+    - cron: '23 12 * * 1-5'
   # Permite rodar na mao pelo botao "Run workflow" na aba Actions.
   workflow_dispatch:
     inputs:
@@ -24,7 +29,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -41,7 +46,13 @@ jobs:
           WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
           STATE_FILE: state/pl3540_state.json
-          FORCE_NOTIFY: 1
+          # As APIs do Senado e da Camara dao timeout com frequencia a partir
+          # dos runners do GitHub (IP fora do Brasil). Timeout curto e mais
+          # tentativas rende melhor do que uma espera longa que estoura o job.
+          HTTP_TIMEOUT: '20'
+          HTTP_TENTATIVAS: '4'
+          # Heartbeat so no cron diario ou quando rodado na mao com a flag.
+          FORCE_NOTIFY: "${{ (github.event.inputs.force_notify == 'true' || github.event.schedule == '23 12 * * 1-5') && '1' || '0' }}"
         run: python monitor_pl3540.py
 
       - name: Commitar baseline (se mudou)
@@ -49,7 +60,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "$(git status --porcelain state/)" ]; then
-            git config user.name  'pl3540-monitor[bot]'
+            git config user.name 'pl3540-monitor[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add state/
             git commit -m 'state: atualiza baseline do PL 3540/2026 [skip ci]'
