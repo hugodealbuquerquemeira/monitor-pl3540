@@ -27,6 +27,17 @@ Fontes consultadas, em ordem de importancia:
 
   4. Tramitacao na Camara - dadosabertos.camara.leg.br
 
+FASE SANCAO (desde 08/09/2026) - fontes mais rapidas que o Senado:
+
+5. Diario Oficial da Uniao - busca do in.gov.br (edicao normal e EXTRAS),
+   secao 1, so Presidencia e Atos do Poder Legislativo. Pega a lei
+   sancionada e a mensagem de veto no minuto em que saem.
+6. Lista "aguardando sancao" do Congresso - a SAIDA do PL dela e sinal
+   de que houve decisao (sancao ou veto).
+7. Noticias do Planalto (RSS gov.br/planalto) - nota oficial.
+8. Google Noticias (RSS) - imprensa (Valor, Estadao, Folha etc.),
+   costuma sair antes do DOU. Desliga com NOTICIAS=0.
+
 Somente biblioteca padrao (sem pip install).
 
 Variaveis de ambiente:
@@ -39,6 +50,10 @@ Variaveis de ambiente:
   AGENDA_COMISSOES=1  liga a varredura das pautas de comissao
   HTTP_TIMEOUT        default: 20 (segundos por requisicao)
   HTTP_TENTATIVAS     default: 4
+  DOU_TERMOS          default: "resseguradoras locais" (separe com ;)
+  NOTICIAS=0          desliga Google Noticias
+  HEARTBEAT_HORAS     ex.: 7-20 -> heartbeat so nesse intervalo (hora BRT);
+                      fora dele, so manda mensagem se houver novidade
   DRY_RUN=1           nao envia nada, so imprime o que enviaria
   FORCE_NOTIFY=1      envia um resumo do estado atual mesmo sem novidade
   FIXTURE_SENADO / FIXTURE_AGENDA / FIXTURE_AGENDA_COMISSOES /
@@ -52,6 +67,7 @@ enviar (o baseline NAO e gravado, para tentar de novo na proxima rodada).
 import datetime
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -78,6 +94,27 @@ SENADO_AGENDA_URL = "%s/plenario/agenda/mes/%%s" % SENADO_API
 SENADO_REUNIOES_URL = "%s/agendareuniao/%%s/%%s" % SENADO_API
 SENADO_LINK = "https://www25.senado.leg.br/web/atividade/materias/-/materia/%s" % SENADO_CODIGO
 CAMARA_API = "https://dadosabertos.camara.leg.br/api/v2"
+
+DOU_BUSCA_URL = "https://www.in.gov.br/consulta/-/buscar/dou"
+DOU_LINK = "https://www.in.gov.br/web/dou/-/%s"
+DOU_TERMOS = [t.strip() for t in os.environ.get(
+    "DOU_TERMOS", '"resseguradoras locais"').split(";") if t.strip()]
+# So interessa o que vem da Presidencia (mensagem de veto) ou a lei em si.
+DOU_ORGAOS = ("presid", "atos do poder legislativo")
+
+CONGRESSO_SANCAO_URL = "https://www.congressonacional.leg.br/materias/materias-aguardando-sancao"
+PLANALTO_RSS = "https://www.gov.br/planalto/pt-br/acompanhe-o-planalto/noticias/RSS"
+NOTICIAS = os.environ.get("NOTICIAS", "1").strip() not in ("", "0", "false", "False")
+GNEWS_QUERY = os.environ.get(
+    "GNEWS_QUERY",
+    '("PL 3540" OR "PL 3.540" OR resseguradoras OR "IRB Re" OR IRBR3) '
+    '(sanciona OR sancionada OR sancionou OR "sanção" OR veto OR veta OR vetou) when:7d')
+GNEWS_URL = "https://news.google.com/rss/search?" + urllib.parse.urlencode({
+    "q": GNEWS_QUERY, "hl": "pt-BR", "gl": "BR", "ceid": "BR:pt-419"})
+# Palavras que fazem um item do Planalto interessar.
+PLANALTO_FILTRO = ("ressegur", "3.540", "3540", "irb")
+
+HEARTBEAT_HORAS = os.environ.get("HEARTBEAT_HORAS", "").strip()
 
 TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "20"))
 TENTATIVAS_HTTP = int(os.environ.get("HTTP_TENTATIVAS", "4"))
@@ -341,6 +378,128 @@ def coletar_camara():
     return list(dict.fromkeys(fatos)), prop_id
 
 
+# ------------------------------------------------------ fase sancao: DOU
+
+def _limpa(texto):
+    """Tira tags HTML e espacos repetidos."""
+    texto = re.sub(r"<[^>]+>", " ", texto or "")
+    return " ".join(texto.split())
+
+def _dou_de_html(bruto):
+    """Resultados da busca do DOU: vem num <script type=application/json>."""
+    html = bruto.decode("utf-8", "replace")
+    m = re.search(r'<script[^>]*BuscaDouPortlet_params[^>]*>(.*?)</script>', html, re.S)
+    if not m:
+        raise RuntimeError("busca do DOU sem o bloco de resultados (layout mudou?)")
+    itens = json.loads(m.group(1)).get("jsonArray") or []
+    fatos = []
+    for o in itens:
+        orgao = (o.get("hierarchyStr") or "")
+        secao = (o.get("pubName") or "")
+        if not secao.upper().startswith("DO1"):
+            continue
+        if not any(k in orgao.lower() for k in DOU_ORGAOS):
+            continue
+        titulo = _limpa(o.get("title"))
+        resumo = _limpa(o.get("content")).lower()
+        tag = ""
+        if "vetar integralmente" in resumo or "vetar totalmente" in resumo:
+            tag = "VETO TOTAL"
+        elif "vetar parcialmente" in resumo:
+            tag = "VETO PARCIAL"
+        elif titulo.upper().startswith("LEI"):
+            tag = "LEI PUBLICADA"
+        partes = [o.get("pubDate") or "", secao.replace("_", " "), titulo, tag,
+                  DOU_LINK % (o.get("urlTitle") or "")]
+        fatos.append("DOU :: " + " | ".join(p for p in partes if p))
+    return fatos
+
+def coletar_dou():
+    """Lei sancionada ou mensagem de veto no DOU (normal e extras), ultimo mes."""
+    bruto = ler_fixture("FIXTURE_DOU")
+    if bruto is not None:
+        return list(dict.fromkeys(_dou_de_html(bruto)))
+    fatos = []
+    for termo in DOU_TERMOS:
+        url = DOU_BUSCA_URL + "?" + urllib.parse.urlencode({
+            "q": termo, "s": "todos", "exactDate": "mes", "sortType": "0"})
+        fatos.extend(_dou_de_html(http_get_retry(url, "text/html")))
+    return list(dict.fromkeys(fatos))
+
+# ------------------------------------ fase sancao: lista aguardando sancao
+
+def _sancao_de_html(bruto):
+    html = bruto.decode("utf-8", "replace")
+    if "Prazo para san" not in html:
+        raise RuntimeError("lista de aguardando sancao sem conteudo (layout mudou?)")
+    alvo = "%s %s/%s" % (CAMARA_SIGLA, CAMARA_NUMERO, CAMARA_ANO)
+    i = html.find(alvo)
+    if i < 0:
+        return ["LISTA SANCAO :: %s SAIU da lista de aguardando sancao - "
+                "houve decisao (sancao ou veto). Confira DOU/Planalto" % alvo]
+    trecho = _limpa(html[i:i + 3000])
+    m = re.search(r"Prazo para san\S* (\d{2}/\d{2}/\d{4})", trecho)
+    prazo = m.group(1) if m else "?"
+    return ["LISTA SANCAO :: %s aguardando sancao, prazo %s" % (alvo, prazo)]
+
+def coletar_lista_sancao():
+    bruto = ler_fixture("FIXTURE_SANCAO")
+    if bruto is None:
+        bruto = http_get_retry(CONGRESSO_SANCAO_URL, "text/html")
+    return _sancao_de_html(bruto)
+
+# --------------------------------------------- fase sancao: RSS de noticias
+
+def _itens_rss(bruto):
+    """(titulo, link, data, fonte, descricao) de RSS 2.0 ou RDF."""
+    raiz = ET.fromstring(bruto)
+    saida = []
+    for item in raiz.iter():
+        if _tag(item) != "item":
+            continue
+        campos = {}
+        for filho in item:
+            campos[_tag(filho)] = (filho.text or "").strip()
+        saida.append((
+            _limpa(campos.get("title")),
+            campos.get("link", ""),
+            campos.get("pubDate") or campos.get("date", ""),
+            campos.get("source", ""),
+            _limpa(campos.get("description")),
+        ))
+    return saida
+
+def coletar_planalto():
+    bruto = ler_fixture("FIXTURE_PLANALTO")
+    if bruto is None:
+        bruto = http_get_retry(PLANALTO_RSS, "application/rss+xml, application/xml")
+    fatos = []
+    for titulo, link, data, _, desc in _itens_rss(bruto):
+        if any(k in (titulo + " " + desc).lower() for k in PLANALTO_FILTRO):
+            fatos.append("PLANALTO :: %s | %s | %s" % (data[:10], titulo, link))
+    return list(dict.fromkeys(fatos))
+
+def coletar_noticias():
+    bruto = ler_fixture("FIXTURE_GNEWS")
+    if bruto is None:
+        bruto = http_get_retry(GNEWS_URL, "application/rss+xml, application/xml")
+    fatos = []
+    for titulo, link, data, fonte, _ in _itens_rss(bruto):
+        # Link do Google News e longo e muda; a chave estavel e o titulo.
+        fatos.append("NOTICIA :: %s (%s)" % (titulo, fonte or "?"))
+    return list(dict.fromkeys(fatos))
+
+def heartbeat_permitido(agora=None):
+    """FORCE_NOTIFY so vale dentro de HEARTBEAT_HORAS (hora de Brasilia)."""
+    if not HEARTBEAT_HORAS:
+        return True
+    try:
+        ini, fim = [int(x) for x in HEARTBEAT_HORAS.split("-")]
+    except ValueError:
+        return True
+    agora = agora or (datetime.datetime.utcnow() - datetime.timedelta(hours=3))
+    return ini <= agora.hour <= fim
+
 # ----------------------------------------------------------------- estado
 
 def carregar_estado():
@@ -474,7 +633,27 @@ def main():
         fatos_camara, prop_id = resultado_camara
         log("  camara: %d tramitacoes lidas" % len(fatos_camara))
 
-    if fatos_senado is None and fatos_pauta is None and fatos_camara is None:
+    fatos_dou = coletar("DOU", coletar_dou, erros)
+    if fatos_dou is not None:
+        log("  DOU: %d atos da Presidencia/Legislativo com o termo" % len(fatos_dou))
+
+    fatos_sancao = coletar("Lista sancao", coletar_lista_sancao, erros)
+    if fatos_sancao is not None:
+        log("  lista aguardando sancao: %s" % "; ".join(fatos_sancao))
+
+    fatos_planalto = coletar("Planalto", coletar_planalto, erros)
+    if fatos_planalto is not None:
+        log("  planalto: %d noticias relevantes" % len(fatos_planalto))
+
+    if NOTICIAS:
+        fatos_noticias = coletar("Noticias", coletar_noticias, erros)
+        if fatos_noticias is not None:
+            log("  google noticias: %d itens" % len(fatos_noticias))
+    else:
+        fatos_noticias = None
+
+    if all(x is None for x in (fatos_senado, fatos_pauta, fatos_camara,
+                                fatos_dou, fatos_sancao, fatos_planalto)):
         log("ERRO: nenhuma fonte respondeu.")
         for e in erros:
             log("  " + e)
@@ -506,6 +685,10 @@ def main():
         "comissoes": manter(fatos_comissoes, "comissoes"),
         "camara": manter(fatos_camara, "camara"),
         "camara_id": prop_id or base.get("camara_id"),
+        "dou": manter(fatos_dou, "dou"),
+        "sancao": manter(fatos_sancao, "sancao"),
+        "planalto": manter(fatos_planalto, "planalto"),
+        "noticias": manter(fatos_noticias, "noticias"),
     }
 
     if primeira_rodada:
@@ -516,6 +699,10 @@ def main():
         return 0
 
     def diff(chave):
+        if chave not in base:
+            # Fonte nova: a 1a leitura vira baseline, sem alertar o passado.
+            log("  fonte nova '%s': baseline gravado sem alertar" % chave)
+            return []
         antes = set(base.get(chave, []))
         return [f for f in novo_estado[chave] if f not in antes]
 
@@ -524,15 +711,38 @@ def main():
     novos_comissoes = diff("comissoes")
     novos_camara = diff("camara")
 
-    todos_novos = novos_senado + novos_pauta + novos_comissoes + novos_camara
+    novos_dou = diff("dou")
+    novos_sancao = diff("sancao")
+    novos_planalto = diff("planalto")
+    novos_noticias = diff("noticias")
+
+    todos_novos = (novos_dou + novos_sancao + novos_planalto + novos_noticias +
+                   novos_senado + novos_pauta + novos_comissoes + novos_camara)
     houve_novidade = bool(todos_novos)
 
-    if not houve_novidade and not FORCE_NOTIFY:
+    if not houve_novidade and not (FORCE_NOTIFY and heartbeat_permitido()):
         log("Sem novidade. Nada enviado.")
         salvar_estado(novo_estado)                     # absorve mudancas de ruido
         return 0
 
-    chaves = classificar(todos_novos)
+    chaves = []
+    if any("VETO TOTAL" in f for f in novos_dou):
+        chaves.append("VETO TOTAL NO DOU")
+    if any("VETO PARCIAL" in f for f in novos_dou):
+        chaves.append("VETO PARCIAL NO DOU")
+    if any("LEI PUBLICADA" in f for f in novos_dou):
+        chaves.append("LEI PUBLICADA NO DOU")
+    if novos_dou and not chaves:
+        chaves.append("ato novo no DOU")
+    if any("SAIU" in f for f in novos_sancao):
+        chaves.append("SAIU DA LISTA DE SANCAO")
+    if novos_planalto:
+        chaves.append("nota do Planalto")
+    if novos_noticias:
+        chaves.append("noticia")
+    chaves += [c for c in classificar(novos_senado + novos_pauta +
+                                      novos_comissoes + novos_camara)
+               if c not in chaves]
     if houve_novidade:
         titulo = "*ATENCAO*: " + ", ".join(chaves) if chaves else "novidade na tramitacao"
     else:
@@ -549,6 +759,10 @@ def main():
         if len(itens) > MAX_ITENS_MSG:
             linhas.append("- (+%d outros)" % (len(itens) - MAX_ITENS_MSG))
 
+    bloco("DOU", [f.split(" :: ", 1)[-1] for f in novos_dou])
+    bloco("Congresso", [f.split(" :: ", 1)[-1] for f in novos_sancao])
+    bloco("Planalto", [f.split(" :: ", 1)[-1] for f in novos_planalto])
+    bloco("Imprensa", [f.split(" :: ", 1)[-1] for f in novos_noticias])
     bloco("Pauta do Plenario", [f.split(" :: ", 1)[-1] for f in novos_pauta])
     bloco("Pauta de comissao", [f.split(" :: ", 1)[-1] for f in novos_comissoes])
 
@@ -566,6 +780,8 @@ def main():
     if not houve_novidade:
         linhas.append("")
         linhas.append("Canal funcionando. Nenhuma movimentacao nova desde a ultima checagem.")
+        if novo_estado.get("sancao"):
+            linhas.append(novo_estado["sancao"][0].split(" :: ", 1)[-1])
 
     linhas.append("")
     linhas.append(SENADO_LINK)
@@ -577,8 +793,10 @@ def main():
                       % "; ".join(e.split(":")[0] for e in erros))
 
     mensagem = "\n".join(linhas)
-    log("Novidade: %d senado / %d pauta / %d comissoes / %d camara. Chaves: %s"
-        % (len(novos_senado), len(novos_pauta), len(novos_comissoes),
+    log("Novidade: %d DOU / %d sancao / %d planalto / %d noticias / %d senado / "
+        "%d pauta / %d comissoes / %d camara. Chaves: %s"
+        % (len(novos_dou), len(novos_sancao), len(novos_planalto), len(novos_noticias),
+           len(novos_senado), len(novos_pauta), len(novos_comissoes),
            len(novos_camara), ", ".join(chaves) or "-"))
 
     if notificar(mensagem):
