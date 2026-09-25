@@ -4,9 +4,9 @@ on:
   # Horarios em UTC. Brasilia = UTC-3.
   # Minutos :17 e :47 de proposito: o agendador do GitHub descarta muita
   # coisa agendada no minuto :00, que e a faixa mais concorrida.
-  # 10-22 UTC = 07h as 19h de Brasilia, de segunda a sexta, a cada 30 min.
+  # 11-22 UTC = 08h as 19h45 de Brasilia, de segunda a quarta, a cada 15 min.
   schedule:
-    - cron: '17,47 10-22 * * 1-5'
+    - cron: '2,17,32,47 11-22 * * 1-3'
   # Permite rodar na mao pelo botao "Run workflow" na aba Actions.
   workflow_dispatch:
     inputs:
