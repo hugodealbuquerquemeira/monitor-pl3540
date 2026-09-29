@@ -37,9 +37,10 @@
   "NOTICIA :: Lula sanciona lei que fixa alíquota de CSLL das sociedades resseguradoras locais - UOL Economia (UOL Economia)",
   "NOTICIA :: IRB-Brasil Resseguros S.A. anuncia sanção da Lei nº 15.525/2026 - Clube FII News (Clube FII News)",
   "NOTICIA :: IRB destaca sanção de lei que altera a tributação aplicável às resseguradoras - financenews.com.br (financenews.com.br)",
-  "NOTICIA :: IRB Brasil (IRBR3) prevê efeito em ativos fiscais após lei que reduz tributos do setor - moneytimes.com.br (moneytimes.com.br)",
+  "NOTICIA :: IRB Brasil (IRBR3) prevê efeito em ativos fiscais após lei que reduz tributos do setor - Money Times (Money Times)",
   "NOTICIA :: Governo federal sanciona lei que altera tributação de sociedades resseguradoras locais - atlaspublico.com.br (atlaspublico.com.br)",
-  "NOTICIA :: IRB informa possível baixa contábil após redução de tributos para resseguradoras - atlaspublico.com.br (atlaspublico.com.br)"
+  "NOTICIA :: IRB informa possível baixa contábil após redução de tributos para resseguradoras - atlaspublico.com.br (atlaspublico.com.br)",
+  "NOTICIA :: Mercados nesta terça, minério, petróleo, notícia da Copasa, Tupy, JSL, JCP do Banestes e outros destaques - financenews.com.br (financenews.com.br)"
  ],
  "pauta": [
   "PAUTA PLENARIO :: 2026-09-03 | SESSÃO DELIBERATIVA ORDINÁRIA | PL 3540/2026 | Extrapauta | -"
@@ -299,6 +300,17 @@
   "tipoDeliberacao :: Aprovada pelo Plenário",
   "idDestino :: 3",
   "siglaDestino :: SANCAO",
-  "destino :: À sanção"
+  "destino :: À sanção",
+  "codigo :: 44076339",
+  "siglaTipo :: LEI-n",
+  "tipo :: Lei Numerada",
+  "numero :: 15525",
+  "anoAssinatura :: 2026",
+  "dataAssinatura :: 2026-09-28",
+  "observacao :: Quanto à vigência desta Lei, vide o art. 6º.",
+  "descricao :: Lei nº 15.525 de 28/09/2026",
+  "dataPublicacao :: 2026-09-29",
+  "siglaVeiculoPublicacao :: DOU",
+  "veiculoPublicacao :: [Diário Oficial da União  de 29/09/2026] (p. 3, col. 1)"
  ]
 }
