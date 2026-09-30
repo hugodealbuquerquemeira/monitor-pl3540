@@ -34,19 +34,19 @@
   "DOU :: 15/09/2026 | DO1 EXTRA C | LEI COMPLEMENTAR Nº 237, DE 15 DE SETEMBRO DE 2026 | LEI PUBLICADA | https://www.in.gov.br/web/dou/-/lei-complementar-n-237-de-15-de-setembro-de-2026-731891987"
  ],
  "noticias": [
-  "NOTICIA :: Presidente sanciona lei que altera regras tributárias para resseguradoras locais - www.gov.br (www.gov.br)",
+  "NOTICIA :: Presidente sanciona lei que altera regras tributárias para resseguradoras locais - gov.br (gov.br)",
   "NOTICIA :: Lei reduz CSLL de resseguradoras locais para 9% a partir de 2027 - Senado Federal (Senado Federal)",
   "NOTICIA :: Lula sanciona lei que fixa alíquota de CSLL das sociedades resseguradoras locais - UOL Economia (UOL Economia)",
   "NOTICIA :: IRB-Brasil Resseguros S.A. anuncia sanção da Lei nº 15.525/2026 - Clube FII News (Clube FII News)",
-  "NOTICIA :: IRB (IRBR3): nova lei reduz impostos e pode liberar vantagem bilionária para a resseguradora - Seu Dinheiro (Seu Dinheiro)",
+  "NOTICIA :: IRB (IRBR3): nova lei reduz impostos e pode liberar vantagem bilionária para a resseguradora - seudinheiro.com (seudinheiro.com)",
   "NOTICIA :: IRB destaca sanção de lei que altera a tributação aplicável às resseguradoras - financenews.com.br (financenews.com.br)",
   "NOTICIA :: Sancionada lei que reduz tributos de resseguradoras nacionais - CNA7 (CNA7)",
   "NOTICIA :: Lei reduz CSLL de resseguradoras locais para 9% em 2027 - Portal Piauí Hoje (Portal Piauí Hoje)",
   "NOTICIA :: Governo federal sanciona lei que altera tributação de sociedades resseguradoras locais - atlaspublico.com.br (atlaspublico.com.br)",
   "NOTICIA :: Lei 15.525 reduz tributos para resseguradoras nacionais - Portal Sertão da Paraíba (Portal Sertão da Paraíba)",
-  "NOTICIA :: CAMARA DOS DEPUTADOS - Lei sancionada reduz carga tributária para resseguradoras brasileiras e flexibiliza regras de compensação de prejuízos fiscais. Mudanças entram em vigor escalonadamente. - Repórter Maceió (Repórter Maceió)",
-  "NOTICIA :: SENADO FEDERAL - Resseguradoras locais terão redução de impostos a partir de 2027, segundo nova lei sancionada pelo Presidente. - Repórter Maceió (Repórter Maceió)",
-  "NOTICIA :: Nova lei reduz tributos para resseguradoras nacionais e busca equilíbrio no mercado de seguros - Ubiratã Online Notícias (Ubiratã Online Notícias)"
+  "NOTICIA :: CAMARA DOS DEPUTADOS - Lei sancionada reduz carga tributária para resseguradoras brasileiras e flexibiliza regras de compensação de prejuízos fiscais. Mudanças entram em vigor escalonadamente. - reportermaceio.com.br (reportermaceio.com.br)",
+  "NOTICIA :: SENADO FEDERAL - Resseguradoras locais terão redução de impostos a partir de 2027, segundo nova lei sancionada pelo Presidente. - reportermaceio.com.br (reportermaceio.com.br)",
+  "NOTICIA :: Nova lei reduz tributos para resseguradoras nacionais e busca equilíbrio no mercado de seguros - ubirataonline.com.br (ubirataonline.com.br)"
  ],
  "pauta": [
   "PAUTA PLENARIO :: 2026-09-03 | SESSÃO DELIBERATIVA ORDINÁRIA | PL 3540/2026 | Extrapauta | -"
@@ -150,9 +150,9 @@
   "tipoAnaliseDeliberacao :: NAO_TERMINATIVA",
   "numero :: 1",
   "descricao :: Autuação Principal",
-  "idEnteControleAtual :: 13594",
-  "siglaEnteControleAtual :: SEADI",
-  "nomeEnteControleAtual :: Secretaria de Atas e Diários",
+  "idEnteControleAtual :: 55304",
+  "siglaEnteControleAtual :: SEXPE",
+  "nomeEnteControleAtual :: Secretaria de Expediente",
   "idTipo :: 175",
   "sigla :: AGDESP",
   "descricao :: AGUARDANDO DESPACHO",
@@ -306,6 +306,7 @@
   "dataRecebimento :: 2026-09-30 14:28:03",
   "id :: 10325645",
   "dataEnvio :: 2026-09-30 14:42:15",
+  "dataRecebimento :: 2026-09-30 15:04:50",
   "codigoSessao :: 588590",
   "dataSessao :: 2026-09-03T14:00:00",
   "casaSessao :: SF",
