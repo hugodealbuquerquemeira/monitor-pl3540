@@ -58,6 +58,9 @@ INICIO = os.environ.get("INICIO", "").strip()
 HEARTBEAT = _flag("HEARTBEAT")
 FORCE_NOTIFY = _flag("FORCE_NOTIFY")
 DRY_RUN = _flag("DRY_RUN")
+# TESTE: lucro ficticio do MES_ALVO em R$ mi. Simula a DRE do mes a partir do
+# mes base, manda o alerta marcado como TESTE e NAO grava estado.
+TESTE_LL_MES = os.environ.get("TESTE_LL_MES", "").strip().replace(",", ".")
 TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "30"))
 TENTATIVAS_HTTP = int(os.environ.get("HTTP_TENTATIVAS", "4"))
 
@@ -433,7 +436,8 @@ def grafico_png(serie, caminho):
                     xytext=(0, 3 if v >= 0 else -11), textcoords="offset points",
                     ha="center", fontsize=9)
     ax.axhline(0, color="#555", linewidth=0.8)
-    ax.set_title("IRB Brasil Re - lucro liquido mensal (SUSEP/SES)", fontsize=12)
+    ax.set_title(("TESTE (%s ficticio) - " % rotulo_curto(MES_ALVO) if TESTE_LL_MES else "")
+                 + "IRB Brasil Re - lucro liquido mensal (SUSEP/SES)", fontsize=12)
     ax.set_ylabel("R$ milhoes")
     ax.spines[["top", "right"]].set_visible(False)
     acum = serie[-1][2]
@@ -500,6 +504,19 @@ def main():
         return 1
     log("  %s: %d linhas na DRE" % (MES_ALVO, len(alvo)))
 
+    if TESTE_LL_MES:
+        base_real = buscar_dre(mes_base, "FIXTURE_BASE")
+        if not base_real or pega(base_real, LL) is None:
+            log("TESTE: mes base %s sem dados, nao da para simular." % mes_base)
+            return 1
+        n = int(mes_base[4:])
+        fator = (n + 1.0) / n          # mais um mes "medio" em cada linha
+        ficticio = float(TESTE_LL_MES) * 1e6
+        alvo = [(c, (pega(base_real, LL) + ficticio) if c.startswith(LL) else v * fator)
+                for c, v in base_real]
+        log("TESTE: DRE de %s SIMULADA, lucro do mes ficticio = R$ %s mi"
+            % (MES_ALVO, TESTE_LL_MES))
+
     if not alvo or pega(alvo, LL) is None:
         log("Mes %s ainda NAO publicado no SES." % MES_ALVO)
         if HEARTBEAT or FORCE_NOTIFY:
@@ -534,11 +551,15 @@ def main():
     ja = estado.get("notificado")
     revisado = ja and estado.get("assinatura") != assinatura
 
-    if ja and not revisado and not FORCE_NOTIFY:
+    if TESTE_LL_MES:
+        ja, revisado = False, False
+    if ja and not revisado and not FORCE_NOTIFY and not TESTE_LL_MES:
         log("Ja notificado em %s e sem revisao de dados. Nada enviado." % estado.get("quando"))
         return 0
 
     titulo = "*SAIU*"
+    if TESTE_LL_MES:
+        titulo = "*TESTE - VALOR FICTICIO, NAO E DADO REAL*"
     if revisado:
         titulo = "*DADO REVISADO* pela SUSEP (recarga)"
     elif ja:
@@ -556,7 +577,8 @@ def main():
                                                   rotulo_curto(serie[-1][0])),
                   grafico_texto(serie)]
         try:
-            png = "charts/irb_lucro_mensal_%s.png" % MES_ALVO
+            png = ("charts/TESTE_irb_lucro_mensal_%s.png" if TESTE_LL_MES
+                   else "charts/irb_lucro_mensal_%s.png") % MES_ALVO
             grafico_png(serie, png)
             log("  grafico gravado em %s" % png)
             url = publicar_png(png)
@@ -574,8 +596,11 @@ def main():
     if notificar(msg):
         if msg_graf:
             time.sleep(5)
-            if not notificar("*IRB (IRBR3)* - " + msg_graf):
+            if not notificar(("*TESTE* " if TESTE_LL_MES else "") + "*IRB (IRBR3)* - " + msg_graf):
                 log("  aviso: mensagem do grafico nao foi enviada")
+        if TESTE_LL_MES:
+            log("TESTE enviado. Estado NAO gravado (o alerta real continua pendente).")
+            return 0
         estado.update({"notificado": True, "assinatura": assinatura,
                        "ll_mes": ll_mes, "ll_acum": ll_acum,
                        "quando": agora_brt().strftime("%Y-%m-%d %H:%M BRT")})
