@@ -1,0 +1,444 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Monitor SUSEP/SES - lucro mensal do IRB Brasil Re (IRBR3).
+
+O que faz: consulta o SES da SUSEP (Resseguradoras Locais -> Demonstracoes
+Contabeis -> DRE, empresa FIP 31623 = IRB BRASIL RESSEGUROS S/A) e avisa no
+WhatsApp quando o mes-alvo (MES_ALVO, ex. 202608) aparece.
+
+A DRE do SES e ACUMULADA NO ANO. O resultado do mes e:
+    mes = acumulado(MES_ALVO) - acumulado(MES_ALVO - 1)
+(em janeiro o acumulado ja e o proprio mes).
+
+A consulta do SES e um formulario ASP.NET: GET na pagina (pega __VIEWSTATE e
+__EVENTVALIDATION + cookie de sessao), POST com empresa/demonstracao/mes, e o
+servidor redireciona para resp_balanco.aspx, que so devolve a tabela se o
+cookie de sessao vier junto. Por isso o opener com CookieJar.
+
+Somente biblioteca padrao (sem pip install).
+
+Variaveis de ambiente:
+  WHATSAPP_PHONE, CALLMEBOT_APIKEY   obrigatorios p/ enviar
+  MES_ALVO          default 202608 (AAAAMM)
+  SUSEP_FIP         default 31623 (IRB)
+  STATE_FILE        default state/susep_irb_state.json
+  INICIO            AAAA-MM-DD: antes dessa data (BRT) a rodada agendada nao faz nada
+  HEARTBEAT=1       manda mensagem em toda rodada enquanto o mes nao sai
+  FORCE_NOTIFY=1    manda o resumo mesmo se ja notificado (teste do canal)
+  DRY_RUN=1         nao envia, so imprime
+  HTTP_TIMEOUT / HTTP_TENTATIVAS
+  FIXTURE_FORM / FIXTURE_ALVO / FIXTURE_BASE / FIXTURE_ANTERIOR  teste offline
+
+Saida: exit 0 em sucesso. exit 1 se falhou ao enviar o alerta (o estado NAO e
+gravado, entao o alerta e reenviado na rodada seguinte).
+"""
+
+import datetime
+import html
+import http.cookiejar
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+# ---------------------------------------------------------------- config
+
+def _flag(nome):
+    return os.environ.get(nome, "").strip() not in ("", "0", "false", "False")
+
+MES_ALVO = os.environ.get("MES_ALVO", "202608").strip()
+SUSEP_FIP = os.environ.get("SUSEP_FIP", "31623").strip()
+STATE_FILE = os.environ.get("STATE_FILE", "state/susep_irb_state.json")
+INICIO = os.environ.get("INICIO", "").strip()
+HEARTBEAT = _flag("HEARTBEAT")
+FORCE_NOTIFY = _flag("FORCE_NOTIFY")
+DRY_RUN = _flag("DRY_RUN")
+TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "30"))
+TENTATIVAS_HTTP = int(os.environ.get("HTTP_TENTATIVAS", "4"))
+
+SES_BASE = "https://www2.susep.gov.br/menuestatistica/ses/"
+SES_FORM = SES_BASE + "balanco.aspx?tipo=resseglocal&id=55"
+SES_LINK = SES_BASE + "principal.aspx"
+DEMONSTRACAO_DRE = "23"
+CAMPO = "ctl00$ContentPlaceHolder1$"
+USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+MAX_MSG_CHARS = 850
+
+# Linhas da DRE que entram no alerta, na ordem. (rotulo curto, prefixo da conta
+# no SES em maiusculas, sem acento). Casa a PRIMEIRA ocorrencia.
+LINHAS = (
+    ("Premios emitidos", "PREMIOS EMITIDOS"),
+    ("Premios ganhos", "(=) PREMIOS GANHOS"),
+    ("Sinistros ocorridos", "(-) SINISTROS OCORRIDOS"),
+    ("Resultado retrocessao", "(+) RESULTADO COM RETROCESSAO"),
+    ("Custos aquisicao", "(-) CUSTOS DE AQUISICAO"),
+    ("Desp. administrativas", "(-) DESPESAS ADMINISTRATIVAS"),
+    ("Desp. tributos", "(-) DESPESAS COM TRIBUTOS"),
+    ("Resultado financeiro", "(+) RESULTADO FINANCEIRO"),
+    ("Resultado patrimonial", "(+) RESULTADO PATRIMONIAL"),
+    ("Resultado operacional", "(=) RESULTADO OPERACIONAL"),
+    ("LAIR", "(=) RESULTADO ANTES DOS IMPOSTOS"),
+    ("IR", "(-) IMPOSTO DE RENDA"),
+    ("CSLL", "(-) CONTRIBUICAO SOCIAL"),
+    ("Participacoes", "(-) PARTICIPACOES SOBRE O RESULTADO"),
+)
+LL = "(=) LUCRO LIQUIDO / PREJUIZO"
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def agora_brt():
+    return (datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(hours=3)).replace(tzinfo=None)
+
+# ------------------------------------------------------------------ meses
+
+def mes_anterior(aaaamm):
+    a, m = int(aaaamm[:4]), int(aaaamm[4:])
+    return "%04d12" % (a - 1) if m == 1 else "%04d%02d" % (a, m - 1)
+
+
+def rotulo_mes(aaaamm):
+    return "%s/%s" % (aaaamm[4:], aaaamm[:4])
+
+# ------------------------------------------------------------------- http
+
+def novo_opener():
+    jar = http.cookiejar.CookieJar()
+    op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    op.addheaders = [("User-Agent", USER_AGENT),
+                     ("Accept-Language", "pt-BR,pt;q=0.9")]
+    return op
+
+
+def ler_fixture(var):
+    caminho = os.environ.get(var)
+    if not caminho:
+        return None
+    with open(caminho, "rb") as fh:
+        return fh.read().decode("utf-8", "replace")
+
+
+def _decodifica(bruto):
+    for enc in ("utf-8", "latin-1"):
+        try:
+            return bruto.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return bruto.decode("utf-8", "replace")
+
+# --------------------------------------------------------------- SES/DRE
+
+def _hidden_fields(pagina):
+    campos = {}
+    for tag in re.findall(r"<input[^>]+>", pagina, re.I):
+        if not re.search(r'type\s*=\s*"hidden"', tag, re.I):
+            continue
+        nome = re.search(r'name\s*=\s*"([^"]*)"', tag)
+        valor = re.search(r'value\s*=\s*"([^"]*)"', tag)
+        if nome:
+            campos[nome.group(1)] = html.unescape(valor.group(1)) if valor else ""
+    return campos
+
+
+def _valor_empresa(pagina):
+    """O value da option vem com espacos a direita ('31623     '), e o
+    __EVENTVALIDATION exige o valor EXATO. Le da propria pagina."""
+    for val in re.findall(r'<option[^>]*value\s*=\s*"([^"]*)"', pagina, re.I):
+        if val.strip() == SUSEP_FIP:
+            return val
+    raise RuntimeError("empresa FIP %s nao aparece na lista do SES" % SUSEP_FIP)
+
+
+def _sem_acento(txt):
+    trocas = str.maketrans("ÁÀÂÃÉÊÍÓÔÕÚÜÇáàâãéêíóôõúüç", "AAAAEEIOOOUUCaaaaeeiooouuc")
+    return txt.translate(trocas)
+
+
+def _num(txt):
+    txt = txt.strip().replace(".", "").replace(",", ".")
+    if txt in ("", "-"):
+        return None
+    try:
+        return float(txt)
+    except ValueError:
+        return None
+
+
+def parse_dre(pagina):
+    """Lista ordenada de (conta_normalizada, valor). [] se o mes nao existe."""
+    linhas = []
+    for linha in re.findall(r"<tr[^>]*>(.*?)</tr>", pagina, re.S | re.I):
+        cels = re.findall(r"<td[^>]*>(.*?)</td>", linha, re.S | re.I)
+        if len(cels) != 2:
+            continue
+        conta = html.unescape(re.sub(r"<[^>]+>", " ", cels[0]))
+        conta = _sem_acento(" ".join(conta.split())).upper()
+        valor = _num(html.unescape(re.sub(r"<[^>]+>", "", cels[1])))
+        if conta and valor is not None:
+            linhas.append((conta, valor))
+    return linhas
+
+
+def buscar_dre(mes, fixture_var):
+    fx = ler_fixture(fixture_var)
+    if fx is not None:
+        return parse_dre(fx)
+    erro = None
+    for i in range(TENTATIVAS_HTTP):
+        try:
+            op = novo_opener()   # sessao nova a cada tentativa
+            form = ler_fixture("FIXTURE_FORM")
+            if form is None:
+                form = _decodifica(op.open(SES_FORM, timeout=TIMEOUT).read())
+            dados = _hidden_fields(form)
+            if "__VIEWSTATE" not in dados:
+                raise RuntimeError("formulario do SES sem __VIEWSTATE (layout mudou?)")
+            dados[CAMPO + "edEmpresas"] = _valor_empresa(form)
+            dados[CAMPO + "edDemonstracao"] = DEMONSTRACAO_DRE
+            dados[CAMPO + "edMes"] = mes
+            dados[CAMPO + "Button1"] = "Processar"
+            corpo = urllib.parse.urlencode(dados).encode("ascii")
+            req = urllib.request.Request(SES_FORM, data=corpo, headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": SES_FORM,
+                "Origin": "https://www2.susep.gov.br",
+            })
+            resp = op.open(req, timeout=TIMEOUT)
+            pagina = _decodifica(resp.read())
+            if "resp_balanco" not in resp.geturl():
+                raise RuntimeError("POST nao redirecionou para resp_balanco (HTTP %s)"
+                                   % resp.status)
+            if "Empresas selecionadas" not in pagina:
+                raise RuntimeError("pagina de resposta inesperada")
+            return parse_dre(pagina)
+        except Exception as exc:  # noqa: BLE001
+            erro = exc
+            espera = 10 * (i + 1)
+            log("  aviso: SES %s falhou (%s). nova tentativa em %ss" % (mes, exc, espera))
+            time.sleep(espera)
+    raise RuntimeError("SES indisponivel para %s: %s" % (mes, erro))
+
+
+def pega(dre, prefixo):
+    for conta, valor in dre:
+        if conta.startswith(prefixo):
+            return valor
+    return None
+
+# ----------------------------------------------------------------- estado
+
+def carregar_estado():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:  # noqa: BLE001
+        log("aviso: estado ilegivel (%s). comecando do zero." % exc)
+        return {}
+
+
+def salvar_estado(estado):
+    pasta = os.path.dirname(STATE_FILE)
+    if pasta:
+        os.makedirs(pasta, exist_ok=True)
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(estado, fh, ensure_ascii=False, indent=1, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, STATE_FILE)
+
+# -------------------------------------------------------------- callmebot
+
+def enviar_whatsapp(texto):
+    fone = os.environ.get("WHATSAPP_PHONE", "").strip()
+    chave = os.environ.get("CALLMEBOT_APIKEY", "").strip()
+    if DRY_RUN or not fone or not chave:
+        motivo = "DRY_RUN" if DRY_RUN else "WHATSAPP_PHONE/CALLMEBOT_APIKEY ausentes"
+        log("--- nao enviado (%s). mensagem seria:\n%s\n---" % (motivo, texto))
+        return DRY_RUN
+    url = "https://api.callmebot.com/whatsapp.php?" + urllib.parse.urlencode({
+        "phone": fone, "text": texto, "apikey": chave})
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            corpo = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        log("  ERRO callmebot: HTTP %s %s" % (exc.code, exc.reason))
+        return False
+    except Exception as exc:  # noqa: BLE001
+        log("  ERRO callmebot: %s" % exc)
+        return False
+    # Repo publico = log publico. Mascara digitos (telefone/apikey).
+    limpo = " ".join(re.sub(r"<[^>]+>", " ", corpo).split())
+    limpo = "".join("x" if ch.isdigit() else ch for ch in limpo)
+    # O fim da resposta e onde o CallMeBot diz se enfileirou ou se a apikey caiu.
+    log("  callmebot HTTP 200, fim da resposta: ...%s" % limpo[-300:])
+    baixo = limpo.lower()
+    if ("apikey" in baixo and ("invalid" in baixo or "not valid" in baixo)) \
+            or "reactivat" in baixo or "activate" in baixo and "you need" in baixo:
+        log("  ERRO callmebot: apikey invalida/expirada - reative o bot no WhatsApp")
+        return False
+    return True
+
+
+def partir(texto, limite=MAX_MSG_CHARS):
+    pedacos, atual = [], ""
+    for linha in texto.split("\n"):
+        if len(atual) + len(linha) + 1 > limite and atual:
+            pedacos.append(atual)
+            atual = linha
+        else:
+            atual = (atual + "\n" + linha) if atual else linha
+    if atual:
+        pedacos.append(atual)
+    return pedacos
+
+
+def notificar(texto):
+    pedacos = partir(texto)
+    ok = True
+    for i, p in enumerate(pedacos):
+        if len(pedacos) > 1:
+            p = "(%d/%d) %s" % (i + 1, len(pedacos), p)
+        if not enviar_whatsapp(p):
+            ok = False
+        if i < len(pedacos) - 1:
+            time.sleep(5)
+    return ok
+
+# ---------------------------------------------------------------- formato
+
+def mi(v):
+    if v is None:
+        return "n/d"
+    s = "%.1f" % (v / 1e6)
+    return "R$ " + s.replace(".", ",") + " mi"
+
+
+def montar_alerta(alvo, base, anterior, mes_base, titulo):
+    janeiro = MES_ALVO.endswith("01")
+    ll_alvo, ll_base = pega(alvo, LL), (0.0 if janeiro else pega(base, LL))
+    ll_mes = None if ll_alvo is None or ll_base is None else ll_alvo - ll_base
+    ll_mes_ant = None
+    if not janeiro and anterior is not None:
+        ant_base = 0.0 if mes_base.endswith("01") else pega(anterior, LL)
+        if ll_base is not None and ant_base is not None:
+            ll_mes_ant = ll_base - ant_base
+
+    linhas = [
+        "*IRB (IRBR3) - SUSEP %s* - %s" % (rotulo_mes(MES_ALVO), titulo),
+        "",
+        "*Lucro liquido %s: %s*" % (rotulo_mes(MES_ALVO), mi(ll_mes)),
+        "(acum. %s %s - acum. %s %s)" % (
+            rotulo_mes(MES_ALVO), mi(ll_alvo),
+            rotulo_mes(mes_base), "-" if janeiro else mi(ll_base)),
+    ]
+    if ll_mes_ant is not None:
+        linhas.append("Mes anterior (%s): %s" % (rotulo_mes(mes_base), mi(ll_mes_ant)))
+    linhas += ["", "[DRE do mes = acum. %s - acum. %s]" % (MES_ALVO[4:], mes_base[4:])]
+    for rot, pref in LINHAS:
+        a = pega(alvo, pref)
+        b = 0.0 if janeiro else pega(base, pref)
+        if a is None or b is None:
+            continue
+        linhas.append("- %s: %s" % (rot, mi(a - b)))
+    linhas += ["", "Fonte: SES/SUSEP, Resseguradoras Locais > DRE, FIP %s" % SUSEP_FIP,
+               SES_LINK]
+    return "\n".join(linhas), ll_mes, ll_alvo
+
+# ------------------------------------------------------------------- main
+
+def main():
+    evento = os.environ.get("GITHUB_EVENT_NAME", "")
+    hoje = agora_brt().date()
+    if INICIO and evento == "schedule" and hoje.isoformat() < INICIO:
+        log("Antes de INICIO=%s (hoje %s BRT). Nada a fazer." % (INICIO, hoje))
+        return 0
+
+    mes_base = mes_anterior(MES_ALVO)
+    log("== monitor SUSEP IRB | alvo %s | base %s | estado %s"
+        % (MES_ALVO, mes_base, STATE_FILE))
+    estado = carregar_estado()
+    if estado.get("mes_alvo") != MES_ALVO:
+        estado = {"mes_alvo": MES_ALVO}
+
+    try:
+        alvo = buscar_dre(MES_ALVO, "FIXTURE_ALVO")
+    except Exception as exc:  # noqa: BLE001
+        log("ERRO: %s" % exc)
+        if HEARTBEAT or FORCE_NOTIFY:
+            enviar_whatsapp("*IRB SUSEP %s* - heartbeat: SES da SUSEP NAO respondeu "
+                            "nesta rodada (%s). Tento de novo em 30 min.\n%s"
+                            % (rotulo_mes(MES_ALVO), str(exc)[:160], SES_LINK))
+        return 1
+    log("  %s: %d linhas na DRE" % (MES_ALVO, len(alvo)))
+
+    if not alvo or pega(alvo, LL) is None:
+        log("Mes %s ainda NAO publicado no SES." % MES_ALVO)
+        if HEARTBEAT or FORCE_NOTIFY:
+            ref = estado.get("ll_base_acum")
+            extra = ""
+            if ref is None:
+                try:
+                    base = buscar_dre(mes_base, "FIXTURE_BASE")
+                    ref = pega(base, LL)
+                    if ref is not None:
+                        estado["ll_base_acum"] = ref
+                        salvar_estado(estado)
+                except Exception as exc:  # noqa: BLE001
+                    log("  aviso: nao li o mes base (%s)" % exc)
+            if ref is not None:
+                extra = "\nUltimo disponivel: LL acum. %s = %s" % (rotulo_mes(mes_base), mi(ref))
+            msg = ("*IRB SUSEP %s* - heartbeat %s\nAinda nao publicado no SES. "
+                   "Monitor e WhatsApp OK.%s"
+                   % (rotulo_mes(MES_ALVO), agora_brt().strftime("%d/%m %H:%M"), extra))
+            return 0 if enviar_whatsapp(msg) else 1
+        return 0
+
+    # Mes saiu.
+    base = buscar_dre(mes_base, "FIXTURE_BASE") if not MES_ALVO.endswith("01") else []
+    try:
+        anterior = buscar_dre(mes_anterior(mes_base), "FIXTURE_ANTERIOR")
+    except Exception as exc:  # noqa: BLE001
+        log("  aviso: sem o mes anterior ao base (%s)" % exc)
+        anterior = None
+
+    assinatura = {"alvo": pega(alvo, LL), "base": pega(base, LL) if base else None}
+    ja = estado.get("notificado")
+    revisado = ja and estado.get("assinatura") != assinatura
+
+    if ja and not revisado and not FORCE_NOTIFY:
+        log("Ja notificado em %s e sem revisao de dados. Nada enviado." % estado.get("quando"))
+        return 0
+
+    titulo = "*SAIU*"
+    if revisado:
+        titulo = "*DADO REVISADO* pela SUSEP (recarga)"
+    elif ja:
+        titulo = "reenvio (teste)"
+    msg, ll_mes, ll_acum = montar_alerta(alvo, base, anterior, mes_base, titulo)
+    log(msg)
+
+    if notificar(msg):
+        estado.update({"notificado": True, "assinatura": assinatura,
+                       "ll_mes": ll_mes, "ll_acum": ll_acum,
+                       "quando": agora_brt().strftime("%Y-%m-%d %H:%M BRT")})
+        salvar_estado(estado)
+        log("Enviado e estado gravado.")
+        return 0
+    log("FALHA no envio. Estado NAO gravado - reenvia na proxima rodada.")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
