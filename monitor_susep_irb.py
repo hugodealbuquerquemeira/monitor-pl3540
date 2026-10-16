@@ -364,8 +364,6 @@ def montar_alerta(alvo, base, anterior, mes_base, titulo):
         if a is None or b is None:
             continue
         linhas.append("- %s: %s" % (rot, mi(a - b)))
-    linhas += ["", "Fonte: SES/SUSEP, Resseguradoras Locais > DRE, FIP %s" % SUSEP_FIP,
-               SES_LINK]
     return "\n".join(linhas), ll_mes, ll_alvo
 
 # ------------------------------------------------- trimestre x consenso
@@ -501,6 +499,9 @@ def publicar_png(caminho):
         git("config", "user.name", "susep-irb-monitor[bot]")
         git("config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
         git("add", caminho)
+        sem_mudanca = subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode == 0
+        if sem_mudanca:   # mesmo PNG ja publicado: so devolve o link
+            return "https://raw.githubusercontent.com/%s/%s/%s" % (repo, ramo, caminho)
         git("commit", "-m", "grafico: lucro mensal IRB %s [skip ci]" % MES_ALVO)
         subprocess.run(["git", "pull", "--rebase", "--autostash", "origin", ramo],
                        timeout=120)
@@ -625,6 +626,7 @@ def main():
         estado["serie"] = [[m, v, a] for m, v, a in serie]
     except Exception as exc:  # noqa: BLE001
         log("  aviso: serie mensal falhou (%s)" % exc)
+    extra += ["", "Fonte: SES/SUSEP, Resseguradoras Locais > DRE, FIP %s" % SUSEP_FIP]
     msg_graf = "\n".join(extra).strip()
     log(msg)
     log(msg_graf)
