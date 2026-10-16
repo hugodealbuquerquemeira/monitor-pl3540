@@ -284,6 +284,9 @@ def enviar_whatsapp(texto):
     # O fim da resposta e onde o CallMeBot diz se enfileirou ou se a apikey caiu.
     log("  callmebot HTTP 200, fim da resposta: ...%s" % limpo[-300:])
     baixo = limpo.lower()
+    if "not sent" in baixo or "messages left" in baixo and "subscribe" in baixo:
+        log("  ERRO callmebot: mensagem NAO enviada (cota/assinatura do CallMeBot)")
+        return False
     if ("apikey" in baixo and ("invalid" in baixo or "not valid" in baixo)) \
             or "reactivat" in baixo or "activate" in baixo and "you need" in baixo:
         log("  ERRO callmebot: apikey invalida/expirada - reative o bot no WhatsApp")
