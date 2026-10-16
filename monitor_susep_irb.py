@@ -61,6 +61,8 @@ DRY_RUN = _flag("DRY_RUN")
 # TESTE: lucro ficticio do MES_ALVO em R$ mi. Simula a DRE do mes a partir do
 # mes base, manda o alerta marcado como TESTE e NAO grava estado.
 TESTE_LL_MES = os.environ.get("TESTE_LL_MES", "").strip().replace(",", ".")
+# Consenso de lucro liquido do trimestre do MES_ALVO, em R$ mi (vazio = sem comparacao)
+CONSENSO_TRI_MI = os.environ.get("CONSENSO_TRI_MI", "").strip().replace(",", ".")
 TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "30"))
 TENTATIVAS_HTTP = int(os.environ.get("HTTP_TENTATIVAS", "4"))
 
@@ -366,6 +368,37 @@ def montar_alerta(alvo, base, anterior, mes_base, titulo):
                SES_LINK]
     return "\n".join(linhas), ll_mes, ll_alvo
 
+# ------------------------------------------------- trimestre x consenso
+
+def bloco_trimestre(serie):
+    """Soma dos meses ja publicados do trimestre do MES_ALVO, implicito para o
+    trimestre ((soma / n meses) * 3) e miss/beat contra o consenso."""
+    ano, m = MES_ALVO[:4], int(MES_ALVO[4:])
+    tri = (m - 1) // 3 + 1
+    meses = ["%s%02d" % (ano, x) for x in range(3 * tri - 2, m + 1)]
+    valores = {mes: v for mes, v, _ in serie}
+    if any(valores.get(x) is None for x in meses):
+        return ""
+    soma = sum(valores[x] for x in meses)
+    n = len(meses)
+    implicito = soma / n * 3
+    nome_tri = "%dQ%s" % (tri, ano[2:])
+    rot = " + ".join(rotulo_curto(x) for x in meses)
+    linhas = ["", "*%s*" % nome_tri,
+              "- Somado %s: %s" % (rot, mi(soma))]
+    if n < 3:
+        linhas.append("- Implicito %s ((%s)/%d x 3): *%s*" % (nome_tri, rot, n, mi(implicito)))
+    else:
+        linhas.append("- %s fechado: *%s*" % (nome_tri, mi(implicito)))
+    if CONSENSO_TRI_MI:
+        cons = float(CONSENSO_TRI_MI) * 1e6
+        desvio = implicito / cons - 1
+        tag = "MISS" if desvio < 0 else "BEAT"
+        linhas.append("- Consenso %s: %s" % (nome_tri, mi(cons)))
+        linhas.append("- *%s: %s%%* (implicito / consenso - 1)"
+                      % (tag, ("%+.1f" % (desvio * 100)).replace(".", ",")))
+    return "\n".join(linhas)
+
 # ------------------------------------------------- serie mensal + graficos
 
 MESES_PT = ("jan", "fev", "mar", "abr", "mai", "jun",
@@ -573,6 +606,9 @@ def main():
         if anterior is not None:
             lidos[mes_anterior(mes_base)] = anterior
         serie = serie_mensal(lidos)
+        tri = bloco_trimestre(serie)
+        if tri:
+            msg = msg.replace("\n\n[DRE do mes", "\n" + tri + "\n\n[DRE do mes", 1)
         extra += ["", "*Lucro mensal %s a %s*" % (rotulo_curto(serie[0][0]),
                                                   rotulo_curto(serie[-1][0])),
                   grafico_texto(serie)]
