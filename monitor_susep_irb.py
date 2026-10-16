@@ -443,8 +443,23 @@ def grafico_texto(serie):
     return "\n".join(linhas)
 
 
+def calc_trimestre(serie):
+    """(nome_tri, n_meses, implicito, consenso|None, desvio|None) ou None."""
+    ano, m = MES_ALVO[:4], int(MES_ALVO[4:])
+    tri = (m - 1) // 3 + 1
+    meses = ["%s%02d" % (ano, x) for x in range(3 * tri - 2, m + 1)]
+    valores = {mes: v for mes, v, _ in serie}
+    if any(valores.get(x) is None for x in meses):
+        return None
+    implicito = sum(valores[x] for x in meses) / len(meses) * 3
+    cons = float(CONSENSO_TRI_MI) * 1e6 if CONSENSO_TRI_MI else None
+    desvio = implicito / cons - 1 if cons else None
+    return "%dQ%s" % (tri, ano[2:]), len(meses), implicito, cons, desvio
+
+
 def grafico_png(serie, caminho):
-    """PNG do lucro mensal. Instala matplotlib so quando precisa."""
+    """PNG do lucro mensal + run-rate do trimestre x consenso.
+    Instala matplotlib so quando precisa."""
     try:
         import matplotlib  # noqa: F401
     except ImportError:
@@ -455,18 +470,57 @@ def grafico_png(serie, caminho):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    def br(v):
+        return ("%.1f" % v).replace(".", ",")
+
     rot = [rotulo_curto(m) for m, _, _ in serie]
     vals = [(v or 0) / 1e6 for _, v, _ in serie]
     cores = ["#1f4e79" if v >= 0 else "#c0392b" for v in vals]
     cores[-1] = "#2e86c1" if vals[-1] >= 0 else "#e74c3c"
-    fig, ax = plt.subplots(figsize=(8, 4.5), dpi=150)
-    barras = ax.bar(rot, vals, color=cores)
+    xs = list(range(len(vals)))
+
+    tri = calc_trimestre(serie)
+    if tri:
+        nome, n, impl, cons, desvio = tri
+        x_rr = len(vals) + 0.6          # espaco separando mensal x trimestral
+        xs.append(x_rr)
+        rot.append("%s\nrun-rate" % nome if n < 3 else "%s\nrealizado" % nome)
+        vals.append(impl / 1e6)
+        cores.append("#7f8c8d")
+        if cons:
+            x_c = x_rr + 1
+            xs.append(x_c)
+            rot.append("%s\nconsenso" % nome)
+            vals.append(cons / 1e6)
+            cores.append("#d5d8dc")
+
+    fig, ax = plt.subplots(figsize=(9.5, 5), dpi=150)
+    barras = ax.bar(xs, vals, color=cores, width=0.8,
+                    edgecolor=["none"] * (len(vals) - 1) + ["#95a5a6"])
     for b, v in zip(barras, vals):
-        ax.annotate(("%.1f" % v).replace(".", ","),
-                    (b.get_x() + b.get_width() / 2, v),
+        ax.annotate(br(v), (b.get_x() + b.get_width() / 2, v),
                     xytext=(0, 3 if v >= 0 else -11), textcoords="offset points",
                     ha="center", fontsize=9)
+    ax.set_xticks(xs)
+    ax.set_xticklabels(rot, fontsize=9)
     ax.axhline(0, color="#555", linewidth=0.8)
+
+    if tri and cons:
+        topo = max(vals) * 1.0
+        ax.set_ylim(top=max(vals) * 1.28)
+        # seta pontilhada vermelha: topo do run-rate -> topo do consenso
+        pad = topo * 0.07               # sai/chega acima dos rotulos de valor
+        ax.annotate("", xy=(x_c - 0.2, cons / 1e6 + pad), xytext=(x_rr, impl / 1e6 + pad),
+                    arrowprops=dict(arrowstyle="-|>", color="#e74c3c", lw=1.8,
+                                    linestyle=(0, (2, 2)), shrinkA=4, shrinkB=4,
+                                    connectionstyle="arc3,rad=-0.25"))
+        tag = "MISS" if desvio < 0 else "BEAT"
+        ax.text((x_rr + x_c) / 2, max(impl, cons) / 1e6 + topo * 0.13,
+                "%s %s%%" % (tag, ("%+.1f" % (desvio * 100)).replace(".", ",")),
+                ha="center", va="bottom", fontsize=11, fontweight="bold",
+                color="#e74c3c" if desvio < 0 else "#1e8449")
+        ax.axvline(len(serie) - 0.2, color="#bbb", linewidth=0.8, linestyle=":")
+
     ax.set_title(("TESTE (%s ficticio) - " % rotulo_curto(MES_ALVO) if TESTE_LL_MES else "")
                  + "IRB Brasil Re - lucro liquido mensal (SUSEP/SES)", fontsize=12)
     ax.set_ylabel("R$ milhoes")
@@ -474,11 +528,13 @@ def grafico_png(serie, caminho):
     acum = serie[-1][2]
     if acum is not None:
         ax.text(0.01, 0.97, "Acumulado %s: R$ %s mi" % (
-            rotulo_curto(serie[-1][0]), ("%.1f" % (acum / 1e6)).replace(".", ",")),
+            rotulo_curto(serie[-1][0]), br(acum / 1e6)),
             transform=ax.transAxes, va="top", fontsize=9, color="#333")
-    fig.text(0.99, 0.01, "Mes = DRE acumulada do mes - acumulada do mes anterior. "
-             "FIP %s." % SUSEP_FIP, ha="right", fontsize=7, color="#777")
-    fig.tight_layout()
+    nota = "Mes = DRE acumulada do mes - acumulada do mes anterior. FIP %s." % SUSEP_FIP
+    if tri and tri[1] < 3:
+        nota = "Run-rate = media dos meses do trimestre x 3. " + nota
+    fig.text(0.99, 0.01, nota, ha="right", fontsize=7, color="#777")
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
     os.makedirs(os.path.dirname(caminho) or ".", exist_ok=True)
     fig.savefig(caminho)
     plt.close(fig)
