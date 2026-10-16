@@ -1,0 +1,68 @@
+name: Monitor SUSEP IRB (lucro mensal)
+
+on:
+  # Horarios em UTC. Brasilia = UTC-3.
+  # 11:02-20:32 UTC + 21:02 UTC = 08h02 as 18h02 BRT, a cada 30 min, seg-sex.
+  # Minuto :02/:32 de proposito: o agendador do GitHub descarta muita coisa no :00.
+  schedule:
+    - cron: '2,32 11-20 * * 1-5'
+    - cron: '2 21 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      force_notify:
+        description: 'Enviar WhatsApp mesmo sem novidade (teste do canal)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: susep-irb-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Rodar monitor
+        env:
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+          STATE_FILE: state/susep_irb_state.json
+          # Mes a monitorar (AAAAMM). Lucro do mes = acumulado deste - acumulado do anterior.
+          MES_ALVO: '202608'
+          SUSEP_FIP: '31623'
+          # Rodadas agendadas so comecam nesta data (BRT). O botao Run workflow ignora.
+          INICIO: '2026-10-19'
+          # Heartbeat em toda rodada enquanto o mes nao sai. Depois do alerta, silencio.
+          HEARTBEAT: '1'
+          FORCE_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && inputs.force_notify && '1' || '' }}
+          HTTP_TIMEOUT: '30'
+          HTTP_TENTATIVAS: '4'
+        run: python monitor_susep_irb.py
+
+      - name: Commitar estado (se mudou)
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain state/)" ]; then
+            git config user.name 'susep-irb-monitor[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add state/
+            git commit -m 'state: atualiza estado do monitor SUSEP IRB [skip ci]'
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          else
+            echo 'estado sem mudanca'
+          fi
