@@ -188,8 +188,12 @@ def parse_dre(pagina):
     return linhas
 
 
-def buscar_dre(mes, fixture_var):
-    fx = ler_fixture(fixture_var)
+def buscar_dre(mes, fixture_var=None):
+    fx = ler_fixture(fixture_var) if fixture_var else None
+    pasta = os.environ.get("FIXTURE_DIR")
+    if fx is None and pasta:
+        caminho = os.path.join(pasta, "dre_%s.html" % mes)
+        fx = open(caminho, encoding="utf-8").read() if os.path.exists(caminho) else ""
     if fx is not None:
         return parse_dre(fx)
     erro = None
@@ -359,6 +363,116 @@ def montar_alerta(alvo, base, anterior, mes_base, titulo):
                SES_LINK]
     return "\n".join(linhas), ll_mes, ll_alvo
 
+# ------------------------------------------------- serie mensal + graficos
+
+MESES_PT = ("jan", "fev", "mar", "abr", "mai", "jun",
+            "jul", "ago", "set", "out", "nov", "dez")
+
+
+def rotulo_curto(aaaamm):
+    return "%s-%s" % (MESES_PT[int(aaaamm[4:]) - 1], aaaamm[2:4])
+
+
+def serie_mensal(ja_lidos):
+    """[(AAAAMM, lucro do mes, lucro acumulado)] de janeiro ate MES_ALVO.
+    Mes = acumulado(m) - acumulado(m-1); janeiro = acumulado de janeiro."""
+    ano = MES_ALVO[:4]
+    acum = {}
+    for m in range(1, int(MES_ALVO[4:]) + 1):
+        mes = "%s%02d" % (ano, m)
+        dre = ja_lidos.get(mes)
+        if dre is None:
+            dre = buscar_dre(mes)
+        acum[mes] = pega(dre, LL)
+    serie, anterior = [], 0.0
+    for mes in sorted(acum):
+        a = acum[mes]
+        serie.append((mes, None if a is None or anterior is None else a - anterior, a))
+        anterior = a
+    return serie
+
+
+def grafico_texto(serie):
+    """Barras em texto: o CallMeBot so manda texto no WhatsApp."""
+    vals = [abs(v) for _, v, _ in serie if v is not None]
+    escala = max(vals) if vals else 1.0
+    linhas = ["```"]
+    for mes, v, _ in serie:
+        if v is None:
+            linhas.append("%s  n/d" % rotulo_curto(mes))
+            continue
+        n = max(1, int(round(12 * abs(v) / escala))) if v else 0
+        barra = ("█" if v >= 0 else "▒") * n
+        linhas.append("%s %6.1f %s" % (rotulo_curto(mes), v / 1e6, barra))
+    linhas.append("```")
+    linhas.append("(R$ mi; ▒ = prejuizo)")
+    return "\n".join(linhas)
+
+
+def grafico_png(serie, caminho):
+    """PNG do lucro mensal. Instala matplotlib so quando precisa."""
+    try:
+        import matplotlib  # noqa: F401
+    except ImportError:
+        import subprocess
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "matplotlib"],
+                       check=True, timeout=240)
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    rot = [rotulo_curto(m) for m, _, _ in serie]
+    vals = [(v or 0) / 1e6 for _, v, _ in serie]
+    cores = ["#1f4e79" if v >= 0 else "#c0392b" for v in vals]
+    cores[-1] = "#2e86c1" if vals[-1] >= 0 else "#e74c3c"
+    fig, ax = plt.subplots(figsize=(8, 4.5), dpi=150)
+    barras = ax.bar(rot, vals, color=cores)
+    for b, v in zip(barras, vals):
+        ax.annotate(("%.1f" % v).replace(".", ","),
+                    (b.get_x() + b.get_width() / 2, v),
+                    xytext=(0, 3 if v >= 0 else -11), textcoords="offset points",
+                    ha="center", fontsize=9)
+    ax.axhline(0, color="#555", linewidth=0.8)
+    ax.set_title("IRB Brasil Re - lucro liquido mensal (SUSEP/SES)", fontsize=12)
+    ax.set_ylabel("R$ milhoes")
+    ax.spines[["top", "right"]].set_visible(False)
+    acum = serie[-1][2]
+    if acum is not None:
+        ax.text(0.01, 0.97, "Acumulado %s: R$ %s mi" % (
+            rotulo_curto(serie[-1][0]), ("%.1f" % (acum / 1e6)).replace(".", ",")),
+            transform=ax.transAxes, va="top", fontsize=9, color="#333")
+    fig.text(0.99, 0.01, "Mes = DRE acumulada do mes - acumulada do mes anterior. "
+             "FIP %s." % SUSEP_FIP, ha="right", fontsize=7, color="#777")
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(caminho) or ".", exist_ok=True)
+    fig.savefig(caminho)
+    plt.close(fig)
+
+
+def publicar_png(caminho):
+    """Commita o PNG ANTES de mandar o WhatsApp, para o link ja abrir.
+    Devolve a URL ou None (fora do GitHub Actions ou se o push falhar)."""
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    ramo = os.environ.get("GITHUB_REF_NAME", "main")
+    if not repo or DRY_RUN:
+        return None
+    import subprocess
+
+    def git(*args):
+        subprocess.run(["git"] + list(args), check=True, timeout=120)
+    try:
+        git("config", "user.name", "susep-irb-monitor[bot]")
+        git("config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
+        git("add", caminho)
+        git("commit", "-m", "grafico: lucro mensal IRB %s [skip ci]" % MES_ALVO)
+        subprocess.run(["git", "pull", "--rebase", "--autostash", "origin", ramo],
+                       timeout=120)
+        git("push", "origin", "HEAD:%s" % ramo)
+    except Exception as exc:  # noqa: BLE001
+        log("  aviso: nao publiquei o grafico (%s)" % exc)
+        return None
+    return "https://raw.githubusercontent.com/%s/%s/%s" % (repo, ramo, caminho)
+
 # ------------------------------------------------------------------- main
 
 def main():
@@ -430,9 +544,38 @@ def main():
     elif ja:
         titulo = "reenvio (teste)"
     msg, ll_mes, ll_acum = montar_alerta(alvo, base, anterior, mes_base, titulo)
+
+    # Serie jan..alvo + graficos. Falha aqui nunca segura o alerta principal.
+    extra = []
+    try:
+        lidos = {MES_ALVO: alvo, mes_base: base}
+        if anterior is not None:
+            lidos[mes_anterior(mes_base)] = anterior
+        serie = serie_mensal(lidos)
+        extra += ["", "*Lucro mensal %s a %s*" % (rotulo_curto(serie[0][0]),
+                                                  rotulo_curto(serie[-1][0])),
+                  grafico_texto(serie)]
+        try:
+            png = "charts/irb_lucro_mensal_%s.png" % MES_ALVO
+            grafico_png(serie, png)
+            log("  grafico gravado em %s" % png)
+            url = publicar_png(png)
+            if url:
+                extra += ["", "Grafico: " + url]
+        except Exception as exc:  # noqa: BLE001
+            log("  aviso: grafico PNG falhou (%s)" % exc)
+        estado["serie"] = [[m, v, a] for m, v, a in serie]
+    except Exception as exc:  # noqa: BLE001
+        log("  aviso: serie mensal falhou (%s)" % exc)
+    msg_graf = "\n".join(extra).strip()
     log(msg)
+    log(msg_graf)
 
     if notificar(msg):
+        if msg_graf:
+            time.sleep(5)
+            if not notificar("*IRB (IRBR3)* - " + msg_graf):
+                log("  aviso: mensagem do grafico nao foi enviada")
         estado.update({"notificado": True, "assinatura": assinatura,
                        "ll_mes": ll_mes, "ll_acum": ll_acum,
                        "quando": agora_brt().strftime("%Y-%m-%d %H:%M BRT")})
