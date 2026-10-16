@@ -47,6 +47,8 @@ jobs:
           # Mes a monitorar (AAAAMM). Lucro do mes = acumulado deste - acumulado do anterior.
           MES_ALVO: '202608'
           SUSEP_FIP: '31623'
+          # Consenso de lucro liquido do trimestre do MES_ALVO (3Q26), em R$ mi
+          CONSENSO_TRI_MI: '130'
           # Rodadas agendadas so comecam nesta data (BRT). O botao Run workflow ignora.
           INICIO: '2026-10-19'
           # Heartbeat em toda rodada enquanto o mes nao sai. Depois do alerta, silencio.
