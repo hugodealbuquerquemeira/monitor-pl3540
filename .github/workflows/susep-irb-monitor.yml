@@ -13,6 +13,10 @@ on:
         description: 'Enviar WhatsApp mesmo sem novidade (teste do canal)'
         type: boolean
         default: true
+      teste_lucro_mes:
+        description: 'TESTE: lucro ficticio do mes-alvo em R$ mi (ex. 35). Vazio = rodada normal'
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -48,6 +52,7 @@ jobs:
           # Heartbeat em toda rodada enquanto o mes nao sai. Depois do alerta, silencio.
           HEARTBEAT: '1'
           FORCE_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && inputs.force_notify && '1' || '' }}
+          TESTE_LL_MES: ${{ inputs.teste_lucro_mes }}
           HTTP_TIMEOUT: '30'
           HTTP_TENTATIVAS: '4'
         run: python monitor_susep_irb.py
