@@ -2,11 +2,15 @@ name: Monitor SUSEP IRB (lucro mensal)
 
 on:
   # Horarios em UTC. Brasilia = UTC-3.
-  # 11:02-20:32 UTC + 21:02 UTC = 08h02 as 18h02 BRT, a cada 30 min, seg-sex.
-  # Minuto :02/:32 de proposito: o agendador do GitHub descarta muita coisa no :00.
+  # Janela: 21/12/2026 a 02/01/2027, dias uteis, 09h02 / 12h02 / 16h02 BRT.
+  # O cron do GitHub nao combina dia-do-mes com dia-da-semana (vira OU),
+  # entao o filtro de dia util e de janela (INICIO/FIM) fica no script.
   schedule:
-    - cron: '2,32 11-20 * * 1-5'
-    - cron: '2 21 * * 1-5'
+    - cron: '2 12,15,19 21-31 12 *'
+    - cron: '2 12,15,19 1-2 1 *'
+    # Keep-alive semanal (segunda 10h17 BRT): o GitHub desliga agendamentos de
+    # repo publico apos 60 dias sem commit. Commit silencioso ate INICIO, sem WhatsApp.
+    - cron: '17 13 * * 1'
   workflow_dispatch:
     inputs:
       force_notify:
@@ -25,8 +29,36 @@ concurrency:
   group: susep-irb-monitor
   cancel-in-progress: false
 
+env:
+  INICIO: '2026-12-21'
+  FIM: '2027-01-02'
+
 jobs:
+  keepalive:
+    if: github.event_name == 'schedule' && github.event.schedule == '17 13 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Commit de keep-alive (so antes do INICIO)
+        run: |
+          set -euo pipefail
+          hoje=$(TZ=America/Sao_Paulo date +%F)
+          if [[ "$hoje" < "$INICIO" ]]; then
+            mkdir -p state
+            echo "$hoje" > state/keepalive.txt
+            git config user.name 'susep-irb-monitor[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add state/keepalive.txt
+            git commit -m "keepalive $hoje [skip ci]" || exit 0
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          else
+            echo "Ja passou de INICIO=$INICIO; keep-alive desnecessario."
+          fi
+
   check:
+    if: github.event_name != 'schedule' || github.event.schedule != '17 13 * * 1'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -45,12 +77,11 @@ jobs:
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
           STATE_FILE: state/susep_irb_state.json
           # Mes a monitorar (AAAAMM). Lucro do mes = acumulado deste - acumulado do anterior.
-          MES_ALVO: '202608'
+          MES_ALVO: '202610'
           SUSEP_FIP: '31623'
-          # Consenso de lucro liquido do trimestre do MES_ALVO (3Q26), em R$ mi
-          CONSENSO_TRI_MI: '130'
-          # Rodadas agendadas so comecam nesta data (BRT). O botao Run workflow ignora.
-          INICIO: '2026-10-19'
+          # Consenso de lucro liquido do trimestre do MES_ALVO (4Q26), em R$ mi
+          CONSENSO_TRI_MI: '158'
+          DIAS_UTEIS: '1'
           # Heartbeat em toda rodada enquanto o mes nao sai. Depois do alerta, silencio.
           HEARTBEAT: '1'
           FORCE_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && inputs.force_notify && '1' || '' }}
