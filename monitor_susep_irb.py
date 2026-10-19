@@ -575,6 +575,13 @@ def main():
     if INICIO and evento == "schedule" and hoje.isoformat() < INICIO:
         log("Antes de INICIO=%s (hoje %s BRT). Nada a fazer." % (INICIO, hoje))
         return 0
+    fim = os.environ.get("FIM", "").strip()
+    if fim and evento == "schedule" and hoje.isoformat() > fim:
+        log("Depois de FIM=%s (hoje %s BRT). Janela encerrada, nada a fazer." % (fim, hoje))
+        return 0
+    if _flag("DIAS_UTEIS") and evento == "schedule" and hoje.weekday() >= 5:
+        log("Fim de semana (%s BRT). Nada a fazer." % hoje)
+        return 0
 
     mes_base = mes_anterior(MES_ALVO)
     log("== monitor SUSEP IRB | alvo %s | base %s | estado %s"
