@@ -1,15 +1,13 @@
-name: Monitor SUSEP IRB (lucro mensal)
+name: Monitor SUSEP IRB + BBSE (lucro mensal)
 
 on:
   # Horarios em UTC. Brasilia = UTC-3.
-  # Janela: 21/12/2026 a 02/01/2027, dias uteis, 09h02 / 12h02 / 16h02 BRT.
-  # O cron do GitHub nao combina dia-do-mes com dia-da-semana (vira OU),
-  # entao o filtro de dia util e de janela (INICIO/FIM) fica no script.
+  # Janela: 23/11/2026 a 31/01/2027 (INICIO/FIM, filtrados no script),
+  # dias uteis, 09h02 / 12h02 / 16h02 BRT. Heartbeat so na rodada das 9h.
   schedule:
-    - cron: '2 12,15,19 21-31 12 *'
-    - cron: '2 12,15,19 1-2 1 *'
+    - cron: '2 12,15,19 * * 1-5'
     # Keep-alive semanal (segunda 10h17 BRT): o GitHub desliga agendamentos de
-    # repo publico apos 60 dias sem commit. Commit silencioso ate INICIO, sem WhatsApp.
+    # repo publico apos 60 dias sem commit. Commit silencioso ate FIM, sem WhatsApp.
     - cron: '17 13 * * 1'
   workflow_dispatch:
     inputs:
@@ -18,9 +16,14 @@ on:
         type: boolean
         default: true
       teste_lucro_mes:
-        description: 'TESTE: lucro ficticio do mes-alvo em R$ mi (ex. 35). Vazio = rodada normal'
+        description: 'TESTE (so IRB): lucro ficticio do mes-alvo em R$ mi (ex. 35). Vazio = rodada normal'
         type: string
         default: ''
+      qual:
+        description: 'Qual monitor rodar'
+        type: choice
+        options: [ambos, irb, bbse]
+        default: ambos
 
 permissions:
   contents: write
@@ -30,8 +33,14 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  INICIO: '2026-12-21'
-  FIM: '2027-01-02'
+  INICIO: '2026-11-23'
+  FIM: '2027-01-31'
+  MES_ALVO: '202610'
+  DIAS_UTEIS: '1'
+  HEARTBEAT: '1'
+  HEARTBEAT_HORAS: '9'
+  HTTP_TIMEOUT: '30'
+  HTTP_TENTATIVAS: '4'
 
 jobs:
   keepalive:
@@ -40,11 +49,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Commit de keep-alive (so antes do INICIO)
+      - name: Commit de keep-alive (ate FIM)
         run: |
           set -euo pipefail
           hoje=$(TZ=America/Sao_Paulo date +%F)
-          if [[ "$hoje" < "$INICIO" ]]; then
+          if [[ ! "$hoje" > "$FIM" ]]; then
             mkdir -p state
             echo "$hoje" > state/keepalive.txt
             git config user.name 'susep-irb-monitor[bot]'
@@ -54,7 +63,7 @@ jobs:
             git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
             git push origin "HEAD:${GITHUB_REF_NAME}"
           else
-            echo "Ja passou de INICIO=$INICIO; keep-alive desnecessario."
+            echo "Ja passou de FIM=$FIM; keep-alive desnecessario."
           fi
 
   check:
@@ -71,24 +80,36 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Rodar monitor
+      - name: Monitor IRB
+        id: irb
+        if: github.event_name != 'workflow_dispatch' || inputs.qual != 'bbse'
+        continue-on-error: true
         env:
           WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
           STATE_FILE: state/susep_irb_state.json
-          # Mes a monitorar (AAAAMM). Lucro do mes = acumulado deste - acumulado do anterior.
-          MES_ALVO: '202610'
+          # Lucro do mes = acumulado de MES_ALVO - acumulado do mes anterior.
           SUSEP_FIP: '31623'
           # Consenso de lucro liquido do trimestre do MES_ALVO (4Q26), em R$ mi
           CONSENSO_TRI_MI: '158'
-          DIAS_UTEIS: '1'
-          # Heartbeat em toda rodada enquanto o mes nao sai. Depois do alerta, silencio.
-          HEARTBEAT: '1'
           FORCE_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && inputs.force_notify && '1' || '' }}
           TESTE_LL_MES: ${{ inputs.teste_lucro_mes }}
-          HTTP_TIMEOUT: '30'
-          HTTP_TENTATIVAS: '4'
         run: python monitor_susep_irb.py
+
+      - name: Monitor BBSE (Brasilseg, Brasilprev, Brasilcap)
+        id: bbse
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.qual != 'irb')
+        continue-on-error: true
+        env:
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+          STATE_FILE: state/susep_bbse_state.json
+          # Participacao da BBSE em cada investida (FIP:%)
+          PARTICIPACOES: '06785:74.99,04707:74.99,20141:66.77'
+          # Consenso de LL atribuivel do trimestre (R$ mi). Vazio = sem miss/beat.
+          CONSENSO_TRI_MI: ''
+          FORCE_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && inputs.force_notify && '1' || '' }}
+        run: python monitor_susep_bbse.py
 
       - name: Commitar estado (se mudou)
         if: always()
@@ -98,9 +119,15 @@ jobs:
             git config user.name 'susep-irb-monitor[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add state/
-            git commit -m 'state: atualiza estado do monitor SUSEP IRB [skip ci]'
+            git commit -m 'state: atualiza estado do monitor SUSEP [skip ci]'
             git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
             git push origin "HEAD:${GITHUB_REF_NAME}"
           else
             echo 'estado sem mudanca'
           fi
+
+      - name: Falhou algum monitor?
+        if: always() && (steps.irb.outcome == 'failure' || steps.bbse.outcome == 'failure')
+        run: |
+          echo "IRB: ${{ steps.irb.outcome }} | BBSE: ${{ steps.bbse.outcome }}"
+          exit 1
