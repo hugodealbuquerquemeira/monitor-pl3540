@@ -24,7 +24,8 @@ Variaveis de ambiente:
   SUSEP_FIP         default 31623 (IRB)
   STATE_FILE        default state/susep_irb_state.json
   INICIO            AAAA-MM-DD: antes dessa data (BRT) a rodada agendada nao faz nada
-  HEARTBEAT=1       manda mensagem em toda rodada enquanto o mes nao sai
+  HEARTBEAT=1       manda mensagem enquanto o mes nao sai
+  HEARTBEAT_HORAS   horas BRT do heartbeat (ex. "9"); vazio = toda rodada
   FORCE_NOTIFY=1    manda o resumo mesmo se ja notificado (teste do canal)
   DRY_RUN=1         nao envia, so imprime
   HTTP_TIMEOUT / HTTP_TENTATIVAS
@@ -56,6 +57,8 @@ SUSEP_FIP = os.environ.get("SUSEP_FIP", "31623").strip()
 STATE_FILE = os.environ.get("STATE_FILE", "state/susep_irb_state.json")
 INICIO = os.environ.get("INICIO", "").strip()
 HEARTBEAT = _flag("HEARTBEAT")
+# Horas BRT em que o heartbeat sai (ex. "9" ou "9,16"). Vazio = toda rodada.
+HEARTBEAT_HORAS = os.environ.get("HEARTBEAT_HORAS", "").strip()
 FORCE_NOTIFY = _flag("FORCE_NOTIFY")
 DRY_RUN = _flag("DRY_RUN")
 # TESTE: lucro ficticio do MES_ALVO em R$ mi. Simula a DRE do mes a partir do
@@ -106,6 +109,18 @@ def agora_brt():
 
 # ------------------------------------------------------------------ meses
 
+def heartbeat_agora():
+    """Heartbeat liberado nesta rodada? Disparo manual sempre manda."""
+    if FORCE_NOTIFY:
+        return True
+    if not HEARTBEAT:
+        return False
+    if not HEARTBEAT_HORAS or os.environ.get("GITHUB_EVENT_NAME") != "schedule":
+        return True
+    horas = {int(h) for h in HEARTBEAT_HORAS.replace(" ", "").split(",") if h}
+    return agora_brt().hour in horas
+
+
 def mes_anterior(aaaamm):
     a, m = int(aaaamm[:4]), int(aaaamm[4:])
     return "%04d12" % (a - 1) if m == 1 else "%04d%02d" % (a, m - 1)
@@ -154,13 +169,14 @@ def _hidden_fields(pagina):
     return campos
 
 
-def _valor_empresa(pagina):
+def _valor_empresa(pagina, fip=None):
     """O value da option vem com espacos a direita ('31623     '), e o
     __EVENTVALIDATION exige o valor EXATO. Le da propria pagina."""
+    fip = fip or SUSEP_FIP
     for val in re.findall(r'<option[^>]*value\s*=\s*"([^"]*)"', pagina, re.I):
-        if val.strip() == SUSEP_FIP:
+        if val.strip() == fip:
             return val
-    raise RuntimeError("empresa FIP %s nao aparece na lista do SES" % SUSEP_FIP)
+    raise RuntimeError("empresa FIP %s nao aparece na lista do SES" % fip)
 
 
 def _sem_acento(txt):
@@ -201,24 +217,30 @@ def buscar_dre(mes, fixture_var=None):
         fx = open(caminho, encoding="utf-8").read() if os.path.exists(caminho) else ""
     if fx is not None:
         return parse_dre(fx)
+    return buscar_dre_ses(SES_FORM, SUSEP_FIP, mes)
+
+
+def buscar_dre_ses(form_url, fip, mes):
+    """DRE (lista de (conta, valor)) da empresa `fip` no formulario `form_url`
+    do SES. [] se o mes ainda nao foi publicado."""
     erro = None
     for i in range(TENTATIVAS_HTTP):
         try:
             op = novo_opener()   # sessao nova a cada tentativa
             form = ler_fixture("FIXTURE_FORM")
             if form is None:
-                form = _decodifica(op.open(SES_FORM, timeout=TIMEOUT).read())
+                form = _decodifica(op.open(form_url, timeout=TIMEOUT).read())
             dados = _hidden_fields(form)
             if "__VIEWSTATE" not in dados:
                 raise RuntimeError("formulario do SES sem __VIEWSTATE (layout mudou?)")
-            dados[CAMPO + "edEmpresas"] = _valor_empresa(form)
+            dados[CAMPO + "edEmpresas"] = _valor_empresa(form, fip)
             dados[CAMPO + "edDemonstracao"] = DEMONSTRACAO_DRE
             dados[CAMPO + "edMes"] = mes
             dados[CAMPO + "Button1"] = "Processar"
             corpo = urllib.parse.urlencode(dados).encode("ascii")
-            req = urllib.request.Request(SES_FORM, data=corpo, headers={
+            req = urllib.request.Request(form_url, data=corpo, headers={
                 "Content-Type": "application/x-www-form-urlencoded",
-                "Referer": SES_FORM,
+                "Referer": form_url,
                 "Origin": "https://www2.susep.gov.br",
             })
             resp = op.open(req, timeout=TIMEOUT)
@@ -232,9 +254,9 @@ def buscar_dre(mes, fixture_var=None):
         except Exception as exc:  # noqa: BLE001
             erro = exc
             espera = 10 * (i + 1)
-            log("  aviso: SES %s falhou (%s). nova tentativa em %ss" % (mes, exc, espera))
+            log("  aviso: SES %s/%s falhou (%s). nova tentativa em %ss" % (fip, mes, exc, espera))
             time.sleep(espera)
-    raise RuntimeError("SES indisponivel para %s: %s" % (mes, erro))
+    raise RuntimeError("SES indisponivel para %s/%s: %s" % (fip, mes, erro))
 
 
 def pega(dre, prefixo):
@@ -540,7 +562,7 @@ def grafico_png(serie, caminho):
     plt.close(fig)
 
 
-def publicar_png(caminho):
+def publicar_png(caminho, mensagem=None):
     """Commita o PNG ANTES de mandar o WhatsApp, para o link ja abrir.
     Devolve a URL ou None (fora do GitHub Actions ou se o push falhar)."""
     repo = os.environ.get("GITHUB_REPOSITORY")
@@ -558,7 +580,7 @@ def publicar_png(caminho):
         sem_mudanca = subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode == 0
         if sem_mudanca:   # mesmo PNG ja publicado: so devolve o link
             return "https://raw.githubusercontent.com/%s/%s/%s" % (repo, ramo, caminho)
-        git("commit", "-m", "grafico: lucro mensal IRB %s [skip ci]" % MES_ALVO)
+        git("commit", "-m", mensagem or "grafico: lucro mensal IRB %s [skip ci]" % MES_ALVO)
         subprocess.run(["git", "pull", "--rebase", "--autostash", "origin", ramo],
                        timeout=120)
         git("push", "origin", "HEAD:%s" % ramo)
@@ -594,9 +616,9 @@ def main():
         alvo = buscar_dre(MES_ALVO, "FIXTURE_ALVO")
     except Exception as exc:  # noqa: BLE001
         log("ERRO: %s" % exc)
-        if HEARTBEAT or FORCE_NOTIFY:
+        if heartbeat_agora():
             enviar_whatsapp("*IRB SUSEP %s* - heartbeat: SES da SUSEP NAO respondeu "
-                            "nesta rodada (%s). Tento de novo em 30 min.\n%s"
+                            "nesta rodada (%s). Tento de novo na proxima rodada.\n%s"
                             % (rotulo_mes(MES_ALVO), str(exc)[:160], SES_LINK))
         return 1
     log("  %s: %d linhas na DRE" % (MES_ALVO, len(alvo)))
@@ -616,7 +638,7 @@ def main():
 
     if not alvo or pega(alvo, LL) is None:
         log("Mes %s ainda NAO publicado no SES." % MES_ALVO)
-        if HEARTBEAT or FORCE_NOTIFY:
+        if heartbeat_agora():
             ref = estado.get("ll_base_acum")
             extra = ""
             if ref is None:
